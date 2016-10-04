@@ -213,9 +213,10 @@ class User(object):
             c = DB.cursor()
             c.execute('INSERT INTO user_filters VALUES ( ? , ? )', (self.id, pokemon_id))
             DB.commit()
-        except:
+        except Exception as e:
             DB.rollback()
-            logging.warning("Could not insert filter for user: {} - {}".format(self.username, pokemon_id))
+            logging.warning("Could not insert filter for user: {} - {} ({})".format(
+                self.username, pokemon_id, e))
             pass
             
 
@@ -224,9 +225,10 @@ class User(object):
             c = DB.cursor()
             c.execute('DELETE FROM user_filters WHERE user_id=? AND pokemon_id=?', (self.id, pokemon_id))
             DB.commit()
-        except:
+        except Exceptino as e:
             DB.rollback()
-            logging.warning("Could not remove filter for user: {} - {}".format(self.username, pokemon_id))
+            logging.warning("Could not remove filter for user: {} - {} ({})".format(
+                self.username, pokemon_id, e))
 
     def filters(self):
         c = DB.cursor()
@@ -315,6 +317,12 @@ class Pokemon(collections.namedtuple('Pokemon', 'id name internal_name rarity'))
         except Exception as e:
             DB.rollback()
             logging.warn("Error saving pokemon({}) - {}".format(self.__dict__, e))
+
+    @classmethod
+    def all(cls):
+        c = DB.cursor()
+        c.execute('SELECT * from `pokemons` ORDER BY id ASC')
+        return map(Pokemon._make, c.fetchall())
 
     @classmethod
     def find(cls, pokeid):

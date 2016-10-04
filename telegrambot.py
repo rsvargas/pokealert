@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+# -*- coding: utf-8 -*-
 from telegram.ext import * #Updater, CommandHandler, MessageHandler, Filters, InlineQueryHandler
 from telegram import *
 import logging
@@ -13,6 +13,14 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 
 logger = logging.getLogger(__name__)
 
+
+emoji = {
+    "map": '\U0001f5fa',
+    "keyboard": '\u2328',
+    "enabled": '\u2714',
+    "disabled": '\u2716',
+    "ruler": '\U0001F4CF'
+}
 
 def get_user(update):
     return  User.find(update.message.chat_id)
@@ -59,6 +67,8 @@ def cmd_start(bot, update):
         logger.info('New User: {} {} (@{}-{})'.format(user.first_name, user.last_name, 
             user.username, chat_id))
 
+    cmd_keyboard(bot, update)
+
 def cmd_list(bot,update):
     chat_id = update.message.chat_id
     user = get_user(update)
@@ -104,12 +114,12 @@ def cmd_distance(bot, update, args):
     user = get_user(update)
 
     if len(args) < 1:
-        bot.sendMessage(chat_id, text="Current distance is {}".format(user.distance))
+        bot.sendMessage(chat_id, text="Current distance is {}m".format(user.distance))
         return
 
     user.distance = int(args[0])
     user.save()
-    bot.sendMessage(chat_id, text="Distance set to {}".format(user.distance))
+    bot.sendMessage(chat_id, text="Distance set to {}m".format(user.distance))
 
 def cmd_location(bot, update):
     chat_id = update.message.chat_id
@@ -132,7 +142,6 @@ def callback_periodic_check(bot, job):
     for u in all_users:
         if not u.position():
             continue
-        print( "Notifying: {}({})".format(u.first_name, u.chat_id))
         filters = list(u.filters()) #must convert to list, maps only iterate once
 
         notified = False
@@ -148,22 +157,77 @@ def callback_periodic_check(bot, job):
                     if u.notify(s.encounter_id):
                         dist = distance(s, u.position())
                         if dist < u.distance:
+                            if not notified:
+                                print( "Notifying: {}({})".format(u.first_name, u.chat_id))
+                                notified = True
                             print( "    spawn: {} dist: {:1.1f}m - exp:{}:{}".format(
                                 f.name, dist, int(secs/60), int(secs%60)))
                             bot.sendVenue(u.chat_id, s.latitude, s.longitude, 
-                                    "{}".format(s.name),
-                                    "Disappear in: {}:{}\nat {}\nDistance: {}".format(
-                                        int(secs/60), int(secs%60), exp, dist) )
-                            notified = True
+                                "{}".format(s.name),
+                                "{:02d}m{:02d}s left ({:02d}:{:02d}) {}m away".format(
+                                    int(secs/60), int(secs%60), exp.hour, exp.minute, exp.second, dist) )
                     break
         if not notified:
             pass
-            #print("    nothing to notify")
 
+def cmd_text(bot, update):
+    chat_id = update.message.chat_id
+    user = get_user(update)
+    cmd = update.message.text[0]
+    if cmd == emoji["map"]:
+        cmd_location(bot, update)
+    elif cmd == emoji["keyboard"]:
+        bot.sendMessage(chat_id=chat_id, text='Keyboard hidden', reply_markup=ReplyKeyboardHide() )
+    elif cmd == emoji["enabled"]:
+        pokename = update.message.text[2:]
+        poke = Pokemon.by_name(pokename)
+        user.del_filter(poke.id)
+        bot.sendMessage(chat_id=chat_id, text='Disabled notifications for ' + pokename, 
+                reply_markup=get_keyboard(user))
+    elif cmd == emoji["disabled"]:
+        pokename = update.message.text[2:]
+        poke = Pokemon.by_name(pokename)
+        user.add_filter(poke.id)
+        bot.sendMessage(chat_id=chat_id, text='Enabled notifications for ' + pokename, 
+                reply_markup=get_keyboard(user))
+    elif cmd == emoji["ruler"]:
+        dist = update.message.text[1:-1]
+        print("dist = " + dist )
+        cmd_distance(bot, update, [dist])
+        #bot.sendMessage(chat_id=chat_id, text="int? = {}".format(dist) )
+
+
+def cmd_keyboard(bot, update):
+    chat_id = update.message.chat_id
+    user = get_user(update)
+    
+    bot.sendMessage(chat_id=chat_id, text="Use keyboard to enable/disable notifications", reply_markup=get_keyboard(user))
+
+
+def get_keyboard(user):
+    filters = [f.name for f in user.filters() ]
+    r = emoji["ruler"]
+    custom_keyboard = [ [ KeyboardButton(text=emoji["map"] + ' Location', request_location=True)],
+        [r+'100m', r+'300m'], [r+'500m', r+'1000m'] ]
+
+    pokes = Pokemon.all()
+    counter = 0
+    row = []
+    for p in pokes:
+        name = emoji["enabled"] if (p.name in filters) else emoji["disabled"]
+        name += ' ' + p.name
+        row.append( name)
+        if len(row) == 2:
+            custom_keyboard.append(row)
+            row = []
+    if len(row) > 0:
+        custom_keyboard.append(row)
+    custom_keyboard.append([KeyboardButton(text=emoji["keyboard"] + ' Hide Keyboard')])
+
+    return ReplyKeyboardMarkup(custom_keyboard)
 
 def error(bot, update, error):
     logger.warn('Update "{}" caused error"{}"'.format( update, error))
-
 
 def main():
     config = {}
@@ -185,6 +249,8 @@ def main():
         dp.add_handler(CommandHandler('rem', cmd_rem, pass_args=True))
         dp.add_handler(CommandHandler('distance', cmd_distance, pass_args=True))
         dp.add_handler(CommandHandler('list', cmd_list))
+        dp.add_handler(CommandHandler('keyboard', cmd_keyboard ))
+        dp.add_handler(MessageHandler([Filters.text], cmd_text))
         dp.add_handler(MessageHandler([Filters.location], cmd_location))
 
         jq = updater.job_queue
