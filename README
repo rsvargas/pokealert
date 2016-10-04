@@ -1,0 +1,14 @@
+
+Telegram Alert system for Pokemon Go based on FastPokeMaps.se's API
+
+Instructions:
+
+1. Get an API key to FPM
+2. Get an bot token to Telegram.
+3. Copy poke.json.example to poke.json
+4. Change the fields to the keys and tokens you got.
+5. run pokedb_data.py to start the database
+6. run poke_daemon.py to do the scans
+7. run telegrambot.py for the notifications
+
+

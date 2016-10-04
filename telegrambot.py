@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+
+from telegram.ext import * #Updater, CommandHandler, MessageHandler, Filters, InlineQueryHandler
+from telegram import *
+import logging
+import sqlite3
+from pokedb import *
+from datetime import *
+import math
+import json
+
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+logger = logging.getLogger(__name__)
+
+
+def get_user(update):
+    return  User.find(update.message.chat_id)
+
+def distance(pA, pB):
+    R = 6371000.0 #raio da terra em metros
+    aLat = math.radians(pA.latitude)
+    aLng = math.radians(pA.longitude)
+    bLat = math.radians(pB.latitude)
+    bLng = math.radians(pB.longitude)
+    distLat = bLat - aLat
+    distLng = (bLng - aLng) * math.cos(0.5*(bLat+aLat))
+
+    dist = R * math.sqrt(distLat*distLat + distLng*distLng)
+    return dist
+
+def cmd_help(bot, update):
+    chat_id = update.message.chat_id
+    bot.sendMessage(chat_id,text=
+'''/help
+/start
+/add <pokemon_name>
+/add <pokemon_name1> <pokemon_name2>...
+/rem <pokemon_name>
+/rem <pokemon_name1> <pokemon_name2>...
+/list - List configured  pokemons
+Send <location> - Update location
+''')
+ 
+
+def cmd_start(bot, update):
+    chat_id = update.message.chat_id
+    user = get_user(update)
+    if user:
+        user.chat_id = chat_id
+        user.save()
+        bot.sendMessage(chat_id, text="Welcome back {}, where are you? Please send me your updated position.".format(user.first_name))
+    else:
+        msgfrom = update.message.from_user
+        user = User.new(msgfrom.first_name, msgfrom.last_name, msgfrom.username, chat_id)
+        user.save()
+        update.message.reply_text("""I'm the PokeBot, I'll let you know when monsters are nearby.
+                Please send your localization and a /distance""")
+        logger.info('New User: {} {} (@{}-{})'.format(user.first_name, user.last_name, 
+            user.username, chat_id))
+
+def cmd_list(bot,update):
+    chat_id = update.message.chat_id
+    user = get_user(update)
+    
+    resp = 'You will receive notifications for: '
+    for f in user.filters():
+        resp += f.name + ' '
+
+    bot.sendMessage( chat_id,  text=resp )
+
+def cmd_add(bot, update, args):
+    chat_id = update.message.chat_id
+    user = get_user(update)
+
+    try:
+        for p in args:
+            poke = Pokemon.by_name(p)
+            print("Adding pokemon: ", poke)
+            user.add_filter(poke.id)
+        cmd_list(bot, update)
+    except Exception as e:
+        logger.error('{} - {}'.format(user.username, e))
+        bot.sendMessage(chat_id,text="/add NAME or /add NAME1 NAME2")
+
+
+def cmd_rem(bot, update, args):
+    chat_id = update.message.chat_id
+    user = get_user(update)
+
+    try:
+        for p in args:
+            poke = Pokemon.by_name(p)
+            print("Removing pokemon: ", poke)
+        user.del_filter(poke.id)
+    except Exception as e:
+        logger.error('{} - {}'.format(user.username, e))
+        bot.sendMessage(chat_id,text="/rem NAME or /rem NAME1 NAME2")
+
+    cmd_list(bot,update)
+
+def cmd_distance(bot, update, args):
+    chat_id = update.message.chat_id
+    user = get_user(update)
+
+    if len(args) < 1:
+        bot.sendMessage(chat_id, text="Current distance is {}".format(user.distance))
+        return
+
+    user.distance = int(args[0])
+    user.save()
+    bot.sendMessage(chat_id, text="Distance set to {}".format(user.distance))
+
+def cmd_location(bot, update):
+    chat_id = update.message.chat_id
+    user = get_user(update)
+
+    try:
+        loc = update.message.location
+        user.update_position(loc.latitude, loc.longitude)
+        bot.sendMessage(chat_id, text='Position set' )
+    except Exception as e:
+        logger.error('{} - {}'.format(user.username, e))
+        bot.sendMessage(chat_id, text="Error setting position")
+
+
+def callback_periodic_check(bot, job):
+    #print('.', end='', flush=True)
+    all_users = User.all()
+    all_spawns = list(Spawn.all_active())
+    now = datetime.now()
+    for u in all_users:
+        if not u.position():
+            continue
+        print( "Notifying: {}({})".format(u.first_name, u.chat_id))
+        filters = list(u.filters()) #must convert to list, maps only iterate once
+
+        notified = False
+
+        for s in all_spawns:
+            exp = datetime.fromtimestamp(s.expiration_timestamp)
+            secs = (exp - now).total_seconds()
+            #print("  {:10s} - {:30s} - {:30s} - {}".format(s.name, str(now), str(exp), secs))
+            if secs < 0:
+                continue
+            for f in filters:
+                if s.name == f.internal_name:
+                    if u.notify(s.encounter_id):
+                        dist = distance(s, u.position())
+                        if dist < u.distance:
+                            print( "    spawn: {} dist: {:1.1f}m - exp:{}:{}".format(
+                                f.name, dist, int(secs/60), int(secs%60)))
+                            bot.sendVenue(u.chat_id, s.latitude, s.longitude, 
+                                    "{}".format(s.name),
+                                    "Disappear in: {}:{}\nat {}\nDistance: {}".format(
+                                        int(secs/60), int(secs%60), exp, dist) )
+                            notified = True
+                    break
+        if not notified:
+            pass
+            #print("    nothing to notify")
+
+
+def error(bot, update, error):
+    logger.warn('Update "{}" caused error"{}"'.format( update, error))
+
+
+def main():
+    config = {}
+    with open('poke.json') as config_file:
+        config = json.load(config_file)
+
+    if 'telegram-token' not in config:
+        print("Configuration file lacks Telegram Token")
+        exit()
+
+    try:
+        updater = Updater(config['telegram-token'])
+
+        dp = updater.dispatcher
+
+        dp.add_handler(CommandHandler('help', cmd_help))
+        dp.add_handler(CommandHandler('start', cmd_start))
+        dp.add_handler(CommandHandler('add', cmd_add, pass_args=True))
+        dp.add_handler(CommandHandler('rem', cmd_rem, pass_args=True))
+        dp.add_handler(CommandHandler('distance', cmd_distance, pass_args=True))
+        dp.add_handler(CommandHandler('list', cmd_list))
+        dp.add_handler(MessageHandler([Filters.location], cmd_location))
+
+        jq = updater.job_queue
+        jq.put(Job(callback_periodic_check, 30.0), next_t=0.0)
+
+        dp.add_error_handler(error)
+
+        logging.info("Starting PokeBot.")
+        updater.start_polling()
+
+        updater.idle()
+    except Exception as e:
+        logging.error("Error starting Bot: {}".format(e))
+
+
+if __name__ == '__main__':
+    main()
+
