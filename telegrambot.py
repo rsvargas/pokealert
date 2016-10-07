@@ -164,8 +164,8 @@ def callback_periodic_check(bot, job):
                                 f.name, dist, int(secs/60), int(secs%60)))
                             bot.sendVenue(u.chat_id, s.latitude, s.longitude, 
                                 "{}".format(s.name),
-                                "{:02d}m{:02d}s left ({:02d}:{:02d}) {}m away".format(
-                                    int(secs/60), int(secs%60), exp.hour, exp.minute, exp.second, dist) )
+                                "{:02d}m{:02d}s left ({:02d}:{:02d}) {:1.1f}m away".format(
+                                    int(secs/60), int(secs%60), exp.hour, exp.minute, dist) )
                     break
         if not notified:
             pass
