@@ -3,17 +3,17 @@
 from telegram.ext import * #Updater, CommandHandler, MessageHandler, Filters, InlineQueryHandler
 from telegram import *
 import logging
+import logging.handlers
 import sqlite3
 from pokedb import *
 from datetime import *
 import math
 import json
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-logger = logging.getLogger(__name__)
+FFORMAT='%(levelname)1.1s|%(asctime)s| %(message)s'
 
 
+logger = logging.getLogger('poke.telegram')
 emoji = {
     "map": '\U0001f5fa',
     "keyboard": '\u2328',
@@ -21,6 +21,20 @@ emoji = {
     "disabled": '\u2716',
     "ruler": '\U0001F4CF'
 }
+
+def config_log(config):
+    filename = "poke.log";
+    if "log-file" in config:
+        filename = config["log-file"]
+
+    handler = logging.handlers.RotatingFileHandler(filename,
+            maxBytes=100*1024*1024, backupCount=5)
+    handler.setFormatter(logging.Formatter(FFORMAT))
+    logger.addHandler(handler)
+    handler.setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
+
+
 
 def get_user(update):
     return  User.find(update.message.chat_id)
@@ -86,11 +100,11 @@ def cmd_add(bot, update, args):
     try:
         for p in args:
             poke = Pokemon.by_name(p)
-            print("Adding pokemon: ", poke)
+            logger.debug("{}({}) add notify: {}".format(user.first_name, chat_id, poke))
             user.add_filter(poke.id)
         cmd_list(bot, update)
     except Exception as e:
-        logger.error('{} - {}'.format(user.username, e))
+        logger.error('{}({}) add error: {}'.format(user.username, chat_id, e))
         bot.sendMessage(chat_id,text="/add NAME or /add NAME1 NAME2")
 
 
@@ -101,10 +115,10 @@ def cmd_rem(bot, update, args):
     try:
         for p in args:
             poke = Pokemon.by_name(p)
-            print("Removing pokemon: ", poke)
+            logger.debug("{}({}) rem notify: {}".format(user.first_name, chat_id, poke))
         user.del_filter(poke.id)
     except Exception as e:
-        logger.error('{} - {}'.format(user.username, e))
+        logger.error('{}({}) rem Error: {}'.format(user.username, chat_id, e))
         bot.sendMessage(chat_id,text="/rem NAME or /rem NAME1 NAME2")
 
     cmd_list(bot,update)
@@ -120,6 +134,7 @@ def cmd_distance(bot, update, args):
     user.distance = int(args[0])
     user.save()
     bot.sendMessage(chat_id, text="Distance set to {}m".format(user.distance))
+    logger.debug("{}({}) Distance: {}m".format(user.first_name, chat_id, user.distance))
 
 def cmd_location(bot, update):
     chat_id = update.message.chat_id
@@ -129,9 +144,12 @@ def cmd_location(bot, update):
         loc = update.message.location
         user.update_position(loc.latitude, loc.longitude)
         bot.sendMessage(chat_id, text='Position set' )
+        logger.debug("{}({}) Position set: lat={}, lng={}".format(user.first_name, chat_id,
+            loc.latitude, loc.longitude))
     except Exception as e:
-        logger.error('{} - {}'.format(user.username, e))
         bot.sendMessage(chat_id, text="Error setting position")
+        logger.error("{}({}) error setting position (msg={}) - {}".format(
+            user.first_name, update.message, e ))
 
 
 def callback_periodic_check(bot, job):
@@ -158,9 +176,10 @@ def callback_periodic_check(bot, job):
                         dist = distance(s, u.position())
                         if dist < u.distance:
                             if not notified:
-                                print( "Notifying: {}({})".format(u.first_name, u.chat_id))
+                                logger.debug( "{}({}) Notifying:".format(u.first_name, u.chat_id))
                                 notified = True
-                            print( "    spawn: {} dist: {:1.1f}m - exp:{}:{}".format(
+
+                                logger.debug( "    spawn: {} dist: {:1.1f}m - exp in {:02d}m{:02d}s".format(
                                 f.name, dist, int(secs/60), int(secs%60)))
                             bot.sendVenue(u.chat_id, s.latitude, s.longitude, 
                                 "{}".format(s.name),
@@ -182,17 +201,18 @@ def cmd_text(bot, update):
         pokename = update.message.text[2:]
         poke = Pokemon.by_name(pokename)
         user.del_filter(poke.id)
+        logger.debug("{}({}) disable notify: {}".format(user.first_name, chat_id, pokename))
         bot.sendMessage(chat_id=chat_id, text='Disabled notifications for ' + pokename, 
                 reply_markup=get_keyboard(user))
     elif cmd == emoji["disabled"]:
         pokename = update.message.text[2:]
         poke = Pokemon.by_name(pokename)
         user.add_filter(poke.id)
+        logger.debug("{}({}) enable notify: {}".format(user.first_name, chat_id, pokename))
         bot.sendMessage(chat_id=chat_id, text='Enabled notifications for ' + pokename, 
                 reply_markup=get_keyboard(user))
     elif cmd == emoji["ruler"]:
         dist = update.message.text[1:-1]
-        print("dist = " + dist )
         cmd_distance(bot, update, [dist])
         #bot.sendMessage(chat_id=chat_id, text="int? = {}".format(dist) )
 
@@ -227,15 +247,17 @@ def get_keyboard(user):
     return ReplyKeyboardMarkup(custom_keyboard)
 
 def error(bot, update, error):
-    logger.warn('Update "{}" caused error"{}"'.format( update, error))
+    logger.error('Update "{}" caused error"{}"'.format( update, error))
 
 def main():
     config = {}
     with open('poke.json') as config_file:
         config = json.load(config_file)
+    config_log(config)
 
     if 'telegram-token' not in config:
         print("Configuration file lacks Telegram Token")
+        logger.error("Configuration file lacks Telegram Token")
         exit()
 
     try:
@@ -258,12 +280,12 @@ def main():
 
         dp.add_error_handler(error)
 
-        logging.info("Starting PokeBot.")
+        logger.info("Starting PokeBot.")
         updater.start_polling()
 
         updater.idle()
     except Exception as e:
-        logging.error("Error starting Bot: {}".format(e))
+        logger.error("Error starting Bot: {}".format(e))
 
 
 if __name__ == '__main__':
