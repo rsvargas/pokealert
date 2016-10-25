@@ -61,6 +61,7 @@ def cmd_help(bot, update):
 /rem <pokemon_name>
 /rem <pokemon_name1> <pokemon_name2>...
 /list - List configured  pokemons
+/keyboard - updates the keyboard
 Send <location> - Update location
 ''')
  
@@ -179,7 +180,7 @@ def callback_periodic_check(bot, job):
                                 logger.debug( "{}({}) Notifying:".format(u.first_name, u.chat_id))
                                 notified = True
 
-                                logger.debug( "    spawn: {} dist: {:1.1f}m - exp in {:02d}m{:02d}s".format(
+                            logger.debug( "    spawn: {} dist: {:1.1f}m - exp in {:02d}m{:02d}s".format(
                                 f.name, dist, int(secs/60), int(secs%60)))
                             bot.sendVenue(u.chat_id, s.latitude, s.longitude, 
                                 "{}".format(s.name),

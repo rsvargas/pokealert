@@ -1,27 +1,39 @@
 import threading
 import sqlite3
+import mysql.connector
 import logging
 import collections
 import time
+import json
 
 DB_threadlocal = threading.local()
 
 class DB(object):
     def __new__(cls, **kwargs):
         if getattr(DB_threadlocal, 'db_instance', None) is None:
+            config = {}
+            with open('poke.json') as config_file:
+                config = json.load(config_file)
+
+            db = config["database"]
+                
             DB_threadlocal.db_instance = object.__new__(cls)
-            DB_threadlocal.db_instance.conn = sqlite3.connect('poke.db')
-            DB_threadlocal.db_instance.conn.row_factory = sqlite3.Row
+            DB_threadlocal.db_instance.conn = mysql.connector.connect(user=db["user"],
+                    password=db["password"], host=db["host"], database=db["database"])
+            DB_threadlocal.db_instance.cursor_param = {"dictionary": True}
             DB_threadlocal.db_instance.__createTables(drop_before=kwargs.get('wipe'))
+
         return DB_threadlocal.db_instance
         
     def __createTables(self, **kwargs):
         drop_before = kwargs.get('drop_before')
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute('SELECT `version` FROM `version` ORDER BY `version` DESC LIMIT 1')
-            self.version = cursor.fetchone()['version']
-        except sqlite3.OperationalError:
+            v = cursor.fetchone()
+            self.version = v['version']
+        except Exception as e:
+            logging.warn("Error reading DB version. ({})".format(e))
             self.version = 0
 
         try:
@@ -44,10 +56,10 @@ class DB(object):
             if self.version < current_version:
                 cursor.execute('''CREATE TABLE `users` (
                     `id` INTEGER NOT NULL UNIQUE PRIMARY KEY,
-                    `first_name` TEXT,
-                    `last_name` TEXT,
-                    `username` TEXT,
-                    `chat_id` TEXT NOT NULL UNIQUE,
+                    `first_name` VARCHAR(256),
+                    `last_name` VARCHAR(256),
+                    `username` VARCHAR(256),
+                    `chat_id` VARCHAR(256) NOT NULL UNIQUE,
                     `distance` INTEGER) ''')
 
                 cursor.execute('''CREATE TABLE `user_positions` (
@@ -57,20 +69,20 @@ class DB(object):
                     `longitude` REAL )''')
 
                 cursor.execute('''CREATE TABLE `location_groups` (
-                    `id` INTEGER NOT NULL UNIQUE PRIMARY KEY,
-                    `name` TEXT )''')
+                    `id` INTEGER NOT NULL UNIQUE PRIMARY KEY AUTO_INCREMENT,
+                    `name` VARCHAR(256) )''')
 
                 cursor.execute('''CREATE TABLE `locations` (
-                    `id` INTEGER NOT NULL UNIQUE PRIMARY KEY,
+                    `id` INTEGER NOT NULL UNIQUE PRIMARY KEY AUTO_INCREMENT,
                     `location_group_id` INTEGER NOT NULL,
-                    `name` TEXT,
+                    `name` VARCHAR(256),
                     `latitude` REAL,
                     `longitude` REAL )''')
 
                 cursor.execute('''CREATE TABLE `pokemons` (
                     `id` INTEGER NOT NULL UNIQUE PRIMARY KEY,
-                    `name` TEXT,
-                    `internal_name` TEXT,
+                    `name` VARCHAR(64),
+                    `internal_name` VARCHAR(64),
                     `rarity` INTEGER )''')
 
                 cursor.execute('''CREATE TABLE `user_filters` (
@@ -79,22 +91,22 @@ class DB(object):
                     PRIMARY KEY( `user_id`, `pokemon_id` ) )''')
 
                 cursor.execute('''CREATE TABLE `spawns` (
-                    `encounter_id` BIGINT UNIQUE,
+                    `encounter_id` VARCHAR(64) UNIQUE,
                     `expiration_timestamp` INTEGER,
                     `latitude` REAL,
                     `longitude` REAL,
-                    `name` TEXT,
-                    `spawn_point_id` )''')
+                    `name` VARCHAR(64),
+                    `spawn_point_id` VARCHAR(256) )''')
 
                 cursor.execute('''CREATE TABLE `notifications` (
-                    `encounter_id` BIGINT,
+                    `encounter_id` VARCHAR(64),
                     `user_id` INTEGER,
                     PRIMARY KEY( `encounter_id`, `user_id`) )''')
 
-                cursor.execute('''CREATE TABLE IF NOT EXISTS `version` (
-                    `version` UNSIGNED INTEGER NOT NULL )''')
+                cursor.execute('''CREATE TABLE `version` (
+                    `version` INTEGER UNSIGNED NOT NULL )''')
 
-                cursor.execute('''INSERT INTO `version` (`version`) values ( ? )''', (current_version,) )
+                cursor.execute('''INSERT INTO `version` (`version`) values ( %s )''', (current_version,) )
 
                 self.conn.commit()
                 self.version = current_version
@@ -102,6 +114,7 @@ class DB(object):
         except Exception as e:
             self.conn.rollback()
             logging.error("Error creating DB: ({}) - {}".format(kwargs, e))
+            raise
 
     @classmethod
     def connection(cls):
@@ -109,7 +122,7 @@ class DB(object):
 
     @classmethod
     def cursor(cls):
-        return cls().conn.cursor()
+        return cls().conn.cursor( **cls().cursor_param )
 
     @classmethod
     def commit(cls):
@@ -119,39 +132,52 @@ class DB(object):
     def rollback(cls):
         return cls().conn.rollback()
 
-class UserFilter(object):
-    __attrs = [ 'user_id', 'pokemon_id']
-    
+class Data(object):
     def __init__(self, **kwargs):
-        for a in UserFilter.__attrs:
-            setattr(self, a, kwargs.get(a))
-
-class Spawn(object):
-    __attrs = [ 'encounter_id', 'expiration_timestamp', 'latitude', 'longitude', 'name', 'spawn_point_id']
-    __update = '''UPDATE spawns set encounter_id=:encounter_id, 
-                    expiration_timestamp=:expiration_timestamp, latitude=:latitude,
-                    longitude=:longitude, name=:name, spawn_point_id=:spawn_point_id
-                    where encounter_id=:encounter_id'''
-
-    __insert = '''INSERT INTO spawns (encounter_id, expiration_timestamp, latitude,
-                    longitude, name, spawn_point_id) SELECT  :encounter_id, 
-                    :expiration_timestamp, :latitude, :longitude, :name, 
-                    :spawn_point_id WHERE(SELECT CHANGES() = 0)'''
-
-    def __init__(self, **kwargs):
-        for a in Spawn.__attrs:
+        for a in self._attrs():
             setattr(self, a, kwargs.get(a))
 
     def save(self):
         try:
             c = DB.cursor()
-            c.execute(Spawn.__update, self.__dict__)
-            c.execute(Spawn.__insert, self.__dict__)
+            c.execute(self._insert(), self.__dict__)
             DB.commit()
-        except Excepion as e:
+        except Exception as e:
             DB.rollback()
-            logging.warn("Error saving Spanw ({}) - {}".format(self.__dict__, e)) 
+            logging.warn("Error saving {} ({}) - {}".format(self.__class__.__name__, self.__dict__, e))
 
+    @classmethod
+    def _make(cls, args):
+        return cls(**args)
+
+    @classmethod 
+    def _attrs(cls):
+        raise NotImplementedError
+
+    @classmethod 
+    def _insert(cls):
+        raise NotImplementedError
+
+
+
+class UserFilter(Data):
+    @classmethod
+    def _attrs(cls):
+        return [  'user_id', 'pokemon_id']
+    
+
+class Spawn(Data):
+    @classmethod
+    def _attrs(cls):
+        return [ 'encounter_id', 'expiration_timestamp', 'latitude', 'longitude', 
+                'name', 'spawn_point_id']
+
+    @classmethod
+    def _insert(cls):
+        return '''INSERT INTO spawns (encounter_id, expiration_timestamp, latitude,
+                    longitude, name, spawn_point_id) 
+                    VALUES ( %(encounter_id)s, %(expiration_timestamp)s, 
+                        %(latitude)s, %(longitude)s, %(name)s, %(spawn_point_id)s )'''
 
     @classmethod
     def register(cls, obj):
@@ -162,41 +188,33 @@ class Spawn(object):
     def all_active(cls):
         c = DB.cursor()
         c.execute('''SELECT * FROM spawns 
-                        WHERE datetime(expiration_timestamp, 'unixepoch') > CURRENT_TIMESTAMP 
+                        WHERE expiration_timestamp > UNIX_TIMESTAMP( NOW() ) 
                         ORDER BY expiration_timestamp ASC''')
         def creator(data):
             return cls(**dict(data))
         return map(creator, c.fetchall())
 
+class Filter(Data):
+    @classmethod
+    def _attrs(cls):
+        return [ 'internal_name', 'name' ]
             
-class User(object):
-    __attrs = [ 'id', 'first_name', 'last_name', 'username', 'chat_id', 'distance' ]
-    __update = '''UPDATE `users` set id=:id, first_name=:first_name, last_name=:last_name, 
-                username=:username, chat_id=:chat_id, distance=:distance 
-                WHERE chat_id=:chat_id'''
-    __insert = '''INSERT INTO `users` 
-                (id, first_name, last_name, username, chat_id, distance) 
-                SELECT :id,:first_name,:last_name,:username,:chat_id,:distance
-                WHERE(SELECT CHANGES() = 0)'''
+class User(Data):
+    @classmethod
+    def _attrs(cls):
+        return  [ 'id', 'first_name', 'last_name', 'username', 'chat_id', 'distance' ]
 
-    def __init__(self, **kwargs):
-        self.last_pos = None
-        for a in User.__attrs:
-            setattr(self, a, kwargs.get(a))
-        
- 
-    def save(self):
-        try:
-            cursor = DB.cursor()
-            cursor.execute(User.__update, self.__dict__)
-            cursor.execute(User.__insert, self.__dict__)
-            self.id = cursor.lastrowid
-            DB.commit()
-            return self
-        except Exception as e:
-            DB.rollback()
-            logging.error("Error saving User ({}) - {}".format(self.__dict__, e))
-            raise
+    @classmethod
+    def _insert(cls):
+        return '''INSERT INTO `users` (id, first_name, last_name, username, chat_id, distance)
+                    VALUES (%(id)s, %(first_name)s, %(last_name)s, %(username)s, %(chat_id)s, 
+                        %(distance)s )
+                    ON DUPLICATE KEY UPDATE
+                        first_name = %(first_name)s,
+                        last_name = %(last_name)s,
+                        username = %(username)s,
+                        chat_id = %(chat_id)s,
+                        distance = %(distance)s'''
 
     def update_position(self, latitude, longitude):
         self.last_pos = UserPosition(user_id=self.id, timestamp=time.time(), 
@@ -204,14 +222,14 @@ class User(object):
         self.last_pos.save()
 
     def position(self):
-        if self.last_pos == None:
+        if not hasattr(self, 'last_pos') or self.last_pos == None:
             self.last_pos = UserPosition.get_last(self.id)
         return self.last_pos
 
     def add_filter(self, pokemon_id):
         try:
             c = DB.cursor()
-            c.execute('INSERT INTO user_filters VALUES ( ? , ? )', (self.id, pokemon_id))
+            c.execute('INSERT INTO user_filters VALUES ( %s , %s )', (self.id, pokemon_id))
             DB.commit()
         except Exception as e:
             DB.rollback()
@@ -223,7 +241,8 @@ class User(object):
     def del_filter(self, pokemon_id):
         try:
             c = DB.cursor()
-            c.execute('DELETE FROM user_filters WHERE user_id=? AND pokemon_id=?', (self.id, pokemon_id))
+            c.execute('DELETE FROM user_filters WHERE user_id=%s AND pokemon_id=%s', 
+                    (self.id, pokemon_id))
             DB.commit()
         except Exceptino as e:
             DB.rollback()
@@ -234,14 +253,14 @@ class User(object):
         c = DB.cursor()
         c.execute('''SELECT internal_name, name FROM user_filters AS f
                     LEFT JOIN pokemons AS p ON p.id = f.pokemon_id
-                    WHERE user_id=?''', (self.id,) )
-        Filter = collections.namedtuple('Filter', 'internal_name, name')
+                    WHERE user_id=%s''', (self.id,) )
+        
         return map(Filter._make, c.fetchall())
 
     def notify(self, encounter_id):
         c = DB.cursor()
         try:
-            c.execute('''INSERT INTO notifications VALUES ( ?, ? ) ''', (encounter_id, self.id))
+            c.execute('''INSERT INTO notifications VALUES ( %s, %s ) ''', (encounter_id, self.id))
             DB.commit()
             return True
         except Exception as e:
@@ -266,57 +285,60 @@ class User(object):
     @classmethod
     def find(cls,chat_id):
         cursor = DB.cursor()
-        cursor.execute('SELECT * from `users` where `chat_id`=?', (chat_id,))
+        cursor.execute('SELECT * from `users` where `chat_id`=%s', (chat_id,))
         data = cursor.fetchone()
         if data == None:
             return None
         return User(**dict(data))
 
-class UserPosition(object):
-    __attrs = [ 'user_id', 'timestamp', 'latitude', 'longitude' ] 
-    __insert = '''INSERT INTO `user_positions` (user_id, timestamp, latitude, longitude) 
-                    VALUES (:user_id, :timestamp, :latitude, :longitude)'''
 
-    def __init__(self, **kwargs):
-        for a in UserPosition.__attrs:
-            setattr(self, a, kwargs.get(a))
+class UserPosition(Data):
+    @classmethod
+    def _attrs(cls):
+        return [ 'user_id', 'timestamp', 'latitude', 'longitude' ] 
 
-    def save(self):
-        try:
-            c = DB.cursor()
-            c.execute(UserPosition.__insert, self.__dict__)
-            DB.commit()
-            return self
-        except Exception as e:
-            DB.rollback()
-            logging.warn("Error saving user position: ({}) - {}".format(self.__dict__, e))
+    @classmethod
+    def _insert(cls):
+        return '''INSERT INTO `user_positions` (user_id, timestamp, latitude, longitude) 
+                    VALUES (%(user_id)s, %(timestamp)s, %(latitude)s, %(longitude)s)'''
 
     @classmethod
     def get_last(cls, user_id):
         c = DB.cursor()
-        c.execute('''SELECT * FROM user_positions WHERE user_id=:user_id 
-                        ORDER BY timestamp DESC LIMIT 1''', (user_id,))
+        c.execute('''SELECT * FROM user_positions WHERE user_id=%(user_id)s
+                        ORDER BY timestamp DESC LIMIT 1''', {'user_id': user_id} )
         data = c.fetchone()
         if data == None:
             return None
         return UserPosition(**dict(data))
 
 
-class Pokemon(collections.namedtuple('Pokemon', 'id name internal_name rarity')):
-    __update = '''UPDATE `pokemons` set id=:id, name=:name, internal_name=:internal_name, 
-                    rarity=:rarity where id=:id'''
-    __insert = '''INSERT INTO `pokemons` (id, name, internal_name, rarity) 
-                    SELECT ?,?,?,? WHERE (SELECT CHANGES() = 0)'''
-    
-    def save(self):
-        try:
-            cursor = DB.cursor()
-            cursor.execute(Pokemon.__update, self)
-            cursor.execute(Pokemon.__insert, self)
-            DB.commit()
-        except Exception as e:
-            DB.rollback()
-            logging.warn("Error saving pokemon({}) - {}".format(self.__dict__, e))
+class Pokemon(Data):
+    @classmethod 
+    def _attrs(cls):
+        return [ 'id', 'name', 'internal_name', 'rarity']
+
+    @classmethod 
+    def _insert(cls):
+        return '''INSERT INTO `pokemons` (id, name, internal_name, rarity) 
+                    VALUES (%(id)s,%(name)s,%(internal_name)s,%(rarity)s) 
+                    ON DUPLICATE KEY UPDATE 
+                        name = %(name)s,
+                        internal_name = %(internal_name)s,
+                        rarity = %(rarity)s'''
+
+    # def __init__(self, **kwargs):
+    #     for a in Pokemon.__attrs:
+    #         setattr(self, a, kwargs.get(a))
+    # 
+    # def save(self):
+    #     try:
+    #         cursor = DB.cursor()
+    #         cursor.execute(Pokemon.__insert, self.__dict__)
+    #         DB.commit()
+    #     except Exception as e:
+    #         DB.rollback()
+    #         logging.warn("Error saving pokemon({}) - {}".format(self.__dict__, e))
 
     @classmethod
     def all(cls):
@@ -327,29 +349,39 @@ class Pokemon(collections.namedtuple('Pokemon', 'id name internal_name rarity'))
     @classmethod
     def find(cls, pokeid):
         cursor = DB.cursor()
-        cursor.execute('SELECT * from `pokemons` where id = ?', (pokeid,))
+        cursor.execute('SELECT * from `pokemons` where id = %s', (pokeid,))
         return Pokemon._make(cursor.fetchone())
 
     @classmethod
     def by_name(cls,name):
         cursor = DB.cursor()
-        cursor.execute('SELECT * from `pokemons` where internal_name LIKE ? or name LIKE ?', (name,name))
+        cursor.execute('SELECT * from `pokemons` where internal_name LIKE %s or name LIKE %s', (name,name))
         return Pokemon._make(cursor.fetchone())
 
 
-class LocationGroup(collections.namedtuple('LocationGroup', 'id name')):
-    __update = '''UPDATE `location_groups` set id=:id, name=:name where id=:id'''
-    __insert = '''INSERT INTO `location_groups` (id, name) 
-                    SELECT ?,? WHERE (SELECT CHANGES() = 0)'''
+class LocationGroup(Data):
+    @classmethod
+    def _attrs(cls):
+        return ['id', 'name']
 
-    def save(self):
-        cursor = DB.cursor()
-        cursor.execute(LocationGroup.__update, self)
-        cursor.execute(LocationGroup.__insert, self)
-        DB.commit()
+    @classmethod
+    def _insert(cls):
+        return '''INSERT INTO `location_groups` (id, name) 
+                    VALUES ( %(id)s, %(name)s )
+                    ON DUPLICATE KEY UPDATE
+                        name = %(name)s'''
+
+    # def __init__(self, **kwargs):
+    #     for a in Pokemon.__attrs:
+    #         setattr(self, a, kwargs.get(a))
+
+    # def save(self):
+    #     cursor = DB.cursor()
+    #     cursor.execute(LocationGroup.__insert, self.__dict__)
+    #     DB.commit()
 
     def add_location(self, name, lat, lng):
-        l = Location( None, self.id, name, lat, lng)
+        l = Location( location_group_id=self.id, name=name, latitude=lat, longitude=lng)
         l.save()
 
     def locations(self):
@@ -358,7 +390,7 @@ class LocationGroup(collections.namedtuple('LocationGroup', 'id name')):
 
     @classmethod
     def new(cls, name):
-        l = LocationGroup(None, name)
+        l = LocationGroup(name=name)
         l.save()
         return cls.find(name)
 
@@ -371,29 +403,37 @@ class LocationGroup(collections.namedtuple('LocationGroup', 'id name')):
     @classmethod
     def find(cls, name):
         cursor = DB.cursor()
-        cursor.execute('SELECT * from `location_groups` where name = ? LIMIT 1', (name,))
+        cursor.execute('SELECT * from `location_groups` where name = %s LIMIT 1', (name,))
         return LocationGroup._make(cursor.fetchone())
 
     @classmethod
     def by_id(cls, group_id):
         cursor = DB.cursor()
-        cursor.execute('SELECT * from `location_groups` where id = ? LIMIT 1', (group_id,))
+        cursor.execute('SELECT * from `location_groups` where id = %s LIMIT 1', (group_id,))
         return LocationGroup._make(cursor.fetchone())
 
  
 
-class Location(collections.namedtuple('Location', 'id location_group_id name latitude longitude')):
-    __update = '''UPDATE `locations` set id=:id, location_group_id=:location_group_id,
-                    name=:name, latitude=:latitude, longitude=:longitude where id=:id'''
-    __insert = '''INSERT INTO `locations` (id, location_group_id, name, latitude, longitude) 
-                    SELECT ?,?,?,?,? WHERE (SELECT CHANGES() = 0)'''
+class Location(Data):
+    @classmethod
+    def _attrs(cls):
+        return ['id', 'location_group_id', 'name', 'latitude','longitude']
 
-    def save(self):
-        cursor = DB.cursor()
-        cursor.execute(Location.__update, self)
-        cursor.execute(Location.__insert, self)
-        self = cursor.lastrowid
-        DB.commit()
+    def _insert(cls):
+        return '''INSERT INTO `locations` (id, location_group_id, name, latitude, longitude) 
+                    VALUES (%(id)s, %(location_group_id)s, %(name)s, %(latitude)s, %(longitude)s )
+                    ON DUPLICATE KEY UPDATE
+                        location_group_id = %(location_group_id)s,
+                        name = %(name)s,
+                        latitude = %(latitude)s,
+                        longitude = %(longitude)s'''
+
+    # def save(self):
+    #     cursor = DB.cursor()
+    #     cursor.execute(Location.__update, self)
+    #     cursor.execute(Location.__insert, self)
+    #     self = cursor.lastrowid
+    #     DB.commit()
 
     def group(self):
         if not hasattr(self, '__group'):
@@ -403,13 +443,13 @@ class Location(collections.namedtuple('Location', 'id location_group_id name lat
     @classmethod
     def by_group(cls, group_id):
         c = DB.cursor()
-        c.execute("SELECT * FROM locations WHERE location_group_id=?", (group_id,))
+        c.execute("SELECT * FROM locations WHERE location_group_id=%s", (group_id,))
         return map(Location._make, c.fetchall())
 
     @classmethod
     def find(cls, loc_id):
         cursor = DB.cursor()
-        cursor.execute('SELECT * from `location` where id = ? LIMIT 1', (loc_id,))
+        cursor.execute('SELECT * from `location` where id = %s LIMIT 1', (loc_id,))
         return LocationGroup._make(cursor.fetchone())
 
          
