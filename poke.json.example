@@ -1,6 +1,7 @@
 {
 	"telegram-token": "TELEGRAM TOKEN",
 	"fpm-api-key": "FAST POKE MAP API KEY",
+	"log-file": "poke.log",
     "proxies": { "https": "https://192.168.1.254" },
     "default-ip": "192.168.1.1"
 }
