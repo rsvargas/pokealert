@@ -273,8 +273,8 @@ def main():
         dp.add_handler(CommandHandler('distance', cmd_distance, pass_args=True))
         dp.add_handler(CommandHandler('list', cmd_list))
         dp.add_handler(CommandHandler('keyboard', cmd_keyboard ))
-        dp.add_handler(MessageHandler([Filters.text], cmd_text))
-        dp.add_handler(MessageHandler([Filters.location], cmd_location))
+        dp.add_handler(MessageHandler(Filters.text, cmd_text))
+        dp.add_handler(MessageHandler(Filters.location, cmd_location))
 
         jq = updater.job_queue
         jq.put(Job(callback_periodic_check, 30.0), next_t=0.0)
